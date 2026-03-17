@@ -1,99 +1,102 @@
+# KamaCache-Go
 
-# KamaCache
+KamaCache-Go 是一个高可用、可扩展的分布式内存缓存系统，使用 Go 语言开发。它采用了类似 groupcache 的无中心化架构设计，通过一致性哈希和 gRPC 通信实现节点间的动态请求路由和负载均衡。
 
-**本项目目前只在[知识星球](https://programmercarl.com/other/kstar.html)里维护，并答疑**
+## 🌟 核心特性
 
-分布式缓存（Go）这个项目在 23年就在星球里发布了。
+- **分布式架构与高可用**：无单点故障，节点之间平等通信。支持水平扩展。
+- **服务注册与发现**：内置集成 Etcd 进行自动化的节点心跳保活和动态服务发现，实现去中心化的平滑扩缩容。
+- **一致性哈希路由**：内置一致性哈希算法，结合虚拟节点机制，使得集群节点增删时最大程度减小缓存失效带来的雪崩影响。具备动态负载均衡能力，可根据请求分布自动调整虚拟节点。
+- **防止缓存击穿**：内置 `singleflight` 机制。对于海量并发访问同一个未命中缓存的 Key，只允许一个请求去回源获取数据，其他请求阻塞等待共享结果，有效防止底层数据库被压垮。
+- **多策略内存管理 (Eviction)**：抽象出底层的 `Store` 接口，内置支持多种缓存淘汰策略（如 `LRU`, `LRU-2`, `TinyLFU` 等），能根据场景需求灵活配置，从而避免偶发性遍历导致热点数据被淘汰。
+- **命名空间隔离 (Group)**：支持在一个进程中创建多个隔离的缓存 Group，每个 Group 拥有独立的回源逻辑 (`GetterFunc`) 和内存上限。
+- **gRPC 通信层**：节点之间的通信基于高效的 gRPC 框架，保证网络传输的高效与可靠。
+- **数据一致性机制**：分布式读写同步，本地无数据自动通过 Peer 查找，Set 和 Delete 操作会在非同步请求的场景下自动广播至其他节点，保证多节点间状态协调。
 
-如今，对这个项目做了第二版优化。
+## 🏗️ 架构概览
 
-对代码讲解，面试问题，和简历写法，都做了补充和完善。
+KamaCache-Go 的主要模块包括：
 
-本项目今天在[知识星球](https://programmercarl.com/other/kstar.html)里正式发布：
+- **节点网络路由** (`server.go`, `client.go`, `pb/`)：封装了底层的通信细节，对外提供标准 API。
+- **分组管理** (`group.go`, `cache.go`)：处理查询、并发控制、本地缓存与远程拉取的协同逻辑。
+- **一致性哈希** (`consistenthash/`)：负责 Key 到节点的映射逻辑和动态哈希环维护。
+- **防击穿控制** (`singleflight/`)：并发请求结果合并。
+- **注册中心** (`registry/`)：通过 Etcd 处理节点的租约与发现。
+- **内存存储引擎** (`store/`)：负责真正的数据存取和空间淘汰。
 
-![image](https://file1.kamacoder.com/i/web/20250414102441.png)
+## 🚀 快速开始
 
-## 什么是缓存
+### 依赖环境
 
-缓存是将高频访问的数据暂存到内存中，是加速数据访问的存储，降低延迟，提高吞吐率的利器。
+- Go 1.18+
+- Etcd 服务端 (推荐 3.x)
 
-## 为什么要实现缓存系统
+### 安装
 
-因缓存的使用相关需求，通过牺牲一部分服务器内存，减少对磁盘或者数据库资源进行直接读写，可换取更快响应速度。
+```bash
+go get github.com/.../KamaCache-Go
+```
 
-尤其是处理高并发的场景，负责存储经常访问的数据，通过设计合理的缓存机制提高资源的访问效率。
+### 使用示例
 
-由于服务器的内存是有限的，我们不能把所有数据都存放在内存中，因此需要一种机制来决定当使用内存超过一定标准时，应该删除哪些数据，这就涉及到缓存淘汰策略的选择。
+以下是一个简单的示例，展示如何启动一个 KamaCache 节点并配置回源逻辑：
 
-## 在什么地方加缓存
+```go
+package main
 
-距离用户越近，缓存能够发挥的效果越好。
+import (
+"context"
+"fmt"
+"log"
 
-缓存的顺序：用户请求->HTTP缓存->CDN缓存->代理服务器缓存->进程内缓存->分布式缓存->数据库
+lcache "github.com/.../KamaCache-Go"
+)
 
-根据 缓存的存储方式 和 应用的耦合度，缓存可以分为 本地缓存（Local Cache） 和 分布式缓存（Distributed Cache）。
+func main() {
+addr := "127.0.0.1:8001"
 
-本地缓存更注重 访问速度，而分布式缓存则关注 数据一致性和扩展性。
+// 1. 创建和启动节点 Server，指定 Etcd 地址
+node, err := lcache.NewServer(addr, "kama-cache", lcache.WithEtcdEndpoints([]string{"127.0.0.1:2379"}))
+if err != nil {
+log.Fatalf("启动 server 失败: %v", err)
+}
+go node.Start()
 
-## 分布式缓存（Distributed Cache）
+// 2. 创建一个 Group 并配置回源逻辑 GetterFunc 和容量上限
+// 当所有节点的缓存中都不存在时，会调用此函数从备用数据源获取数据
+group := lcache.NewGroup("scores", 2<<20, lcache.GetterFunc(
+func(ctx context.Context, key string) ([]byte, error) {
+log.Printf("[缓慢的数据库查询] 正在获取 Key: %s", key)
+return []byte("Data From DB for " + key), nil
+}))
 
-分布式缓存是一种 独立部署的缓存服务，与应用进程分离，多个应用实例共享同一份缓存数据，典型实现包括 Redis、Memcached、etcd。
+// 3. 创建 PeerPicker (节点选择器) 并注册到 Group
+picker, err := lcache.NewClientPicker(addr)
+if err != nil {
+log.Fatalf("创建客户端失败: %v", err)
+}
+group.RegisterPeers(picker)
 
-优势
+// 4. 进行业务查询及操作
+ctx := context.Background()
 
-1、支持大规模存储：
+// 写入缓存 (自动同步)
+group.Set(ctx, "tom", []byte("95"))
 
-  * 缓存数据分布在多个服务器上，不受单机内存限制，可扩展存储空间。
-  * 例如：Redis Cluster 支持横向扩展，通过分片技术存储 TB 级数据。
+// 查询缓存 (自动进行哈希路由或回源)
+val, err := group.Get(ctx, "tom")
+if err != nil {
+log.Printf("获取失败: %v", err)
+} else {
+fmt.Printf("Get 结果: %s\n", string(val))
+}
+}
+```
 
-2、数据一致性更高：
-  * 由于所有应用节点共享同一份缓存数据，不同服务器间的缓存一致性更容易保证。
-  * 例如：所有服务器都访问 Redis，数据变更时只需更新 Redis 即可同步到所有应用实例。
+## 📈 运维与监控
 
-3、高可用性：
+KamaCache 在内部记录了各项关键指标的统计数据包（Hit Rate, Miss Rate, Load Time 等），开发者可以根据需求扩展 Prometheus/Metrics 导出模块，对集群的健康情况和缓存命中率进行大盘监控。
 
-* Redis Sentinel 或 主从复制 方案可提供 缓存高可用性，即使某个缓存节点宕机，仍可快速切换到备用节点，避免单点故障。
-* 持久化机制（AOF/RDB） 使 Redis 在服务器重启后仍能恢复数据，保证缓存数据不会丢失。
+## 📜 许可证
 
-4、适用于分布式系统：
-* 现代应用通常采用 多实例部署（如 Kubernetes 微服务架构），本地缓存难以满足数据共享需求，而 分布式缓存天然适用于多实例环境。
-
-
-## 项目专栏精讲
-
-该项目的专栏是[知识星球](https://programmercarl.com/other/kstar.html)录友专享的。
-
-项目专栏依然是将 「简历写法」给大家列出来了，大家学完就可以参考这个来写简历：
-
-![image](https://file1.kamacoder.com/i/web/20250414101516.png)
-
-做完该项目，面试中大概率会有哪些面试问题，以及如何回答，也列出好了：
-
-![image](https://file1.kamacoder.com/i/web/20250414101617.png)
-
-专栏中的项目面试题都掌握的话，这个项目在面试中基本没问题。
-
-项目架构：
-
-![image](https://file1.kamacoder.com/i/web/20250414101706.png)
-
-本项目主要模块：缓存组、缓存淘汰与实现、缓存并发、分布式算法之一致性哈希、缓存对外服务化 都做了详细的讲解：
-
-![image](https://file1.kamacoder.com/i/web/20250414101827.png)
-
-![image](https://file1.kamacoder.com/i/web/20250414101856.png)
-
-![image](https://file1.kamacoder.com/i/web/20250414101913.png)
-
-![image](https://file1.kamacoder.com/i/web/20250414101930.png)
-
-
-## 获取本项目专栏
-
-**本文档仅为星球内部专享，大家可以加入[知识星球](https://programmercarl.com/other/kstar.html)里获取，在星球置顶一**
-
-
-## 许可证
-
-MIT License
-
+开源协议: [MIT License](LICENSE)
