@@ -2,6 +2,7 @@ package store
 
 import (
 	"hash/fnv"
+	"sync"
 )
 
 type CountMinSketch struct {
@@ -109,7 +110,6 @@ func Constructor(maxBytes uint64) *LRUCache {
 func (lru *LRUCache) removeNode(node *Node) {
 	node.prev.next = node.next
 	node.next.prev = node.prev
-	lru.usedBytes -= uint64(len(node.key) + node.val.Len())
 }
 
 func (lru *LRUCache) addToHead(node *Node) {
@@ -126,6 +126,7 @@ func (lru *LRUCache) moveToHead(node *Node) {
 }
 
 type TinyLFU struct {
+	mu  sync.Mutex
 	lru *LRUCache
 	cms *CountMinSketch
 }
@@ -138,6 +139,8 @@ func NewTinyLFU(capacity int, cmsWidth, cmsDepth int) *TinyLFU {
 }
 
 func (t *TinyLFU) Get(key string) (Value, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.cms.Insert(key) // 关键附加动作：每次读取都增加频率
 
 	if node, ok := t.lru.cache[key]; ok {
@@ -177,6 +180,8 @@ func (t *TinyLFU) canEvictWithEstimatedSize(node *Node) (int, bool) {
 }
 
 func (t *TinyLFU) Insert(key string, val Value) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if node, ok := t.lru.cache[key]; ok {
 		// 更新已有节点的值，并调整内存容量
 		t.lru.usedBytes += uint64(val.Len()) - uint64(node.val.Len())
