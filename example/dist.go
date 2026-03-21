@@ -10,7 +10,7 @@ import (
 	lcache "github.com/youngyangyang04/KamaCache-Go"
 )
 
-func main() {
+func runDistributedTest() {
 	// 添加命令行参数，用于区分不同节点
 	port := flag.Int("port", 8001, "节点端口")
 	nodeID := flag.String("node", "A", "节点标识符")
