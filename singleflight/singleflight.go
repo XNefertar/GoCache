@@ -7,7 +7,7 @@ import (
 // 代表正在进行或已结束的请求
 type call struct {
 	wg  sync.WaitGroup
-	val interface{}
+	val any
 	err error
 }
 
@@ -17,7 +17,7 @@ type Group struct {
 }
 
 // Do 针对相同的key，保证多次调用Do()，都只会调用一次fn
-func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, error) {
+func (g *Group) Do(key string, fn func() (any, error)) (any, error) {
 	// Check if there is already an ongoing call for this key
 	if existing, ok := g.m.Load(key); ok {
 		c := existing.(*call)
