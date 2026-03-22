@@ -1,6 +1,5 @@
 module github.com/youngyangyang04/KamaCache-Go
 
-
 go 1.22
 
 toolchain go1.22.11

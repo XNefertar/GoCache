@@ -2,10 +2,11 @@ package kamacache
 
 import (
 	"context"
-	"github.com/youngyangyang04/KamaCache-Go/store"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/youngyangyang04/KamaCache-Go/store"
 
 	"github.com/sirupsen/logrus"
 )

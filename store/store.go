@@ -22,8 +22,9 @@ type Store interface {
 type CacheType string
 
 const (
-	LRU  CacheType = "lru"
-	LRU2 CacheType = "lru2"
+	LRU     CacheType = "lru"
+	LRU2    CacheType = "lru2"
+	TINYLFU CacheType = "tinylfu"
 )
 
 // Options 通用缓存配置选项
@@ -34,6 +35,8 @@ type Options struct {
 	Level2Cap       uint16 // lru-2 中二级缓存的容量（用于 lru-2）
 	CleanupInterval time.Duration
 	OnEvicted       func(key string, value Value)
+	CMSWidth        uint64
+	CMSDepth        uint64
 }
 
 func NewOptions() Options {
@@ -44,6 +47,8 @@ func NewOptions() Options {
 		Level2Cap:       256,
 		CleanupInterval: time.Minute,
 		OnEvicted:       nil,
+		CMSWidth:        1000,
+		CMSDepth:        5,
 	}
 }
 
@@ -54,6 +59,8 @@ func NewStore(cacheType CacheType, opts Options) Store {
 		return newLRU2Cache(opts)
 	case LRU:
 		return newLRUCache(opts)
+	case TINYLFU:
+		return newTinyLFU(opts)
 	default:
 		return newLRUCache(opts)
 	}
