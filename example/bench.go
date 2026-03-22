@@ -8,6 +8,7 @@ import (
 	"github.com/sirupsen/logrus"
 	kamacache "github.com/youngyangyang04/KamaCache-Go"
 	"github.com/youngyangyang04/KamaCache-Go/benchmark"
+	"github.com/youngyangyang04/KamaCache-Go/store"
 )
 
 func runBenchmarkMode() {
@@ -54,4 +55,31 @@ func runBenchmarkMode() {
 	misses2 := dbMissCount.Load()
 	realHitRate2 := float64(totalRequests-int(misses2)) / float64(totalRequests) * 100
 	fmt.Printf("[Real Metrics via DB] Hit Rate: %.2f%% (%d Misses / %d requests)\n\n", realHitRate2, misses2, totalRequests)
+
+	// 3. 测试tinylfu
+	fmt.Println("\n>>> Testing For TINYLFU")
+	tinylfuOpts := kamacache.DefaultCacheOptions()
+	tinylfuOpts.MaxBytes = 10 * 1024 * 1024 // 也要设置容量
+	tinylfuOpts.CacheType = store.TINYLFU
+	cacheGroup3 := kamacache.NewGroup("benchmark-group-3", tinylfuOpts.MaxBytes, mockDBGetter, kamacache.WithCacheOptions(tinylfuOpts))
+
+	// Scan 模式
+	fmt.Println("\n>>> Testing Scan Mode (Full Table Scan)")
+	dbMissCount.Store(0)
+	benchmark.RunBenchmark(benchmark.Scan, keySpace, totalRequests, concurrency, cacheGroup3)
+
+	misses3 := dbMissCount.Load()
+	realHitRate3 := float64(totalRequests-int(misses3)) / float64(totalRequests) * 100
+	fmt.Printf("[Real Metrics via DB] Hit Rate: %.2f%% (%d Misses / %d requests)\n\n", realHitRate3, misses3, totalRequests)
+
+	// 4. 测试tinylfu Zipfian
+	cacheGroup4 := kamacache.NewGroup("benchmark-group-4", tinylfuOpts.MaxBytes, mockDBGetter, kamacache.WithCacheOptions(tinylfuOpts))
+
+	fmt.Println("\n>>> Testing Zipfian Mode (Hotspot)")
+	dbMissCount.Store(0)
+	benchmark.RunBenchmark(benchmark.Zipfian, keySpace, totalRequests, concurrency, cacheGroup4)
+
+	misses4 := dbMissCount.Load()
+	realHitRate4 := float64(totalRequests-int(misses4)) / float64(totalRequests) * 100
+	fmt.Printf("[Real Metrics via DB] Hit Rate: %.2f%% (%d Misses / %d requests)\n", realHitRate4, misses4, totalRequests)
 }
