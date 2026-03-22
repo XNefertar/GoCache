@@ -3,7 +3,20 @@ package store
 import (
 	"hash/fnv"
 	"sync"
+	"time"
 )
+
+type CMSOptions struct {
+	cmsWidth uint64
+	cmsDepth uint64
+}
+
+func NewCMSOptions() CMSOptions {
+	return CMSOptions{
+		cmsWidth: 1000,
+		cmsDepth: 5,
+	}
+}
 
 type CountMinSketch struct {
 	width uint64
@@ -13,6 +26,22 @@ type CountMinSketch struct {
 	seeds      []uint64
 	itemsAdded uint64
 	windowSize uint64
+}
+
+func NewCountMinSketch(opts CMSOptions) *CountMinSketch {
+	seeds := make([]uint64, opts.cmsDepth)
+	for i := range opts.cmsDepth {
+		seeds[i] = uint64(i*1315423911 + 1)
+	}
+
+	return &CountMinSketch{
+		width:      uint64(opts.cmsWidth),
+		depth:      uint64(opts.cmsDepth),
+		table:      make([]uint32, opts.cmsWidth*opts.cmsDepth),
+		seeds:      seeds,
+		itemsAdded: 0,
+		windowSize: uint64(10 * opts.cmsWidth * opts.cmsDepth),
+	}
 }
 
 type Node struct {
@@ -30,11 +59,37 @@ func (n *Node) size() uint64 {
 }
 
 type LRUCache struct {
-	cache     map[string]*Node
-	maxBytes  uint64
-	usedBytes uint64
-	head      *Node
-	tail      *Node
+	cache           map[string]*Node
+	maxBytes        uint64
+	usedBytes       uint64
+	head            *Node
+	tail            *Node
+	expires         map[string]time.Time // 过期时间映射
+	cleanupInterval time.Duration
+	cleanupTicker   *time.Ticker
+	closeCh         chan struct{}
+}
+
+func NewLRUCache(opts LRUOptions) *LRUCache {
+	cleanupInterval := opts.cleanupInterval
+	if cleanupInterval <= 0 {
+		cleanupInterval = time.Minute
+	}
+	head := &Node{}
+	tail := &Node{}
+
+	head.next = tail
+	tail.prev = head
+	return &LRUCache{
+		cache:           make(map[string]*Node),
+		expires:         make(map[string]time.Time),
+		maxBytes:        opts.maxBytes,
+		head:            head,
+		tail:            tail,
+		cleanupInterval: cleanupInterval,
+		cleanupTicker:   time.NewTicker(cleanupInterval),
+		closeCh:         make(chan struct{}),
+	}
 }
 
 func NewNode(key string, val Value) *Node {
@@ -45,22 +100,6 @@ func NewNode(key string, val Value) *Node {
 	return node
 }
 
-func NewCountMinSketch(width, depth int) *CountMinSketch {
-	seeds := make([]uint64, depth)
-	for i := range depth {
-		seeds[i] = uint64(i*1315423911 + 1)
-	}
-
-	return &CountMinSketch{
-		width:      uint64(width),
-		depth:      uint64(depth),
-		table:      make([]uint32, width*depth),
-		seeds:      seeds,
-		itemsAdded: 0,
-		windowSize: uint64(10 * width * depth),
-	}
-}
-
 // 提取基础哈希计算，避免循环内重复创建对象和计算哈希
 func (cms *CountMinSketch) baseHash(key string) uint64 {
 	h := fnv.New64a()
@@ -68,7 +107,7 @@ func (cms *CountMinSketch) baseHash(key string) uint64 {
 	return h.Sum64()
 }
 
-func (cms *CountMinSketch) Insert(key string) {
+func (cms *CountMinSketch) insert(key string) {
 	h := cms.baseHash(key)
 	for i := range cms.depth {
 		index := uint64(i)*cms.width + ((h ^ cms.seeds[i]) % cms.width)
@@ -83,7 +122,7 @@ func (cms *CountMinSketch) Insert(key string) {
 	}
 }
 
-func (cms *CountMinSketch) Estimate(key string) uint64 {
+func (cms *CountMinSketch) estimate(key string) uint64 {
 	h := cms.baseHash(key)
 	Min := uint32(^uint32(0))
 	for i := range cms.depth {
@@ -93,17 +132,15 @@ func (cms *CountMinSketch) Estimate(key string) uint64 {
 	return uint64(Min)
 }
 
-func Constructor(maxBytes uint64) *LRUCache {
-	head := &Node{}
-	tail := &Node{}
+type LRUOptions struct {
+	maxBytes        uint64
+	cleanupInterval time.Duration
+}
 
-	head.next = tail
-	tail.prev = head
-	return &LRUCache{
-		cache:    make(map[string]*Node),
-		maxBytes: uint64(maxBytes),
-		head:     head,
-		tail:     tail,
+func NewLRUOptions() LRUOptions {
+	return LRUOptions{
+		maxBytes:        8192,
+		cleanupInterval: 5,
 	}
 }
 
@@ -131,17 +168,37 @@ type TinyLFU struct {
 	cms *CountMinSketch
 }
 
-func NewTinyLFU(capacity int, cmsWidth, cmsDepth int) *TinyLFU {
-	return &TinyLFU{
-		lru: Constructor(uint64(capacity)),
-		cms: NewCountMinSketch(cmsWidth, cmsDepth),
+func newTinyLFU(opts Options) *TinyLFU {
+	t := &TinyLFU{
+		lru: NewLRUCache(LRUOptions{
+			maxBytes:        uint64(opts.MaxBytes),
+			cleanupInterval: opts.CleanupInterval,
+		}),
+		cms: NewCountMinSketch(CMSOptions{
+			cmsWidth: uint64(opts.CMSWidth),
+			cmsDepth: uint64(opts.CMSDepth),
+		}),
 	}
+	go t.cleanupLoop()
+	return t
 }
 
 func (t *TinyLFU) Get(key string) (Value, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.cms.Insert(key) // 关键附加动作：每次读取都增加频率
+
+	// 惰性删除检查（否则会读到已过期但还未被后台协程清理的数据）
+	if expTime, ok := t.lru.expires[key]; ok && time.Now().After(expTime) {
+		if node, exists := t.lru.cache[key]; exists {
+			t.lru.removeNode(node)
+			t.lru.usedBytes -= node.size()
+			delete(t.lru.cache, node.key)
+		}
+		delete(t.lru.expires, key)
+		return nil, false
+	}
+
+	t.cms.insert(key) // 关键附加动作：每次读取都增加频率
 
 	if node, ok := t.lru.cache[key]; ok {
 		t.lru.moveToHead(node)
@@ -157,7 +214,7 @@ func (t *TinyLFU) canEvictWithEstimatedSize(node *Node) (int, bool) {
 	}
 	needToEvictedCount := 0
 	nodeSize := node.size()
-	candidateFreq := t.cms.Estimate(node.key)
+	candidateFreq := t.cms.estimate(node.key)
 	tempUsedByts := t.lru.usedBytes
 	if nodeSize > t.lru.maxBytes {
 		return -1, false
@@ -167,7 +224,7 @@ func (t *TinyLFU) canEvictWithEstimatedSize(node *Node) (int, bool) {
 		if cur == t.lru.head {
 			return -1, false
 		}
-		curFreq := t.cms.Estimate(cur.key)
+		curFreq := t.cms.estimate(cur.key)
 		if candidateFreq > curFreq {
 			needToEvictedCount++
 			tempUsedByts -= cur.size()
@@ -179,35 +236,109 @@ func (t *TinyLFU) canEvictWithEstimatedSize(node *Node) (int, bool) {
 	return needToEvictedCount, true
 }
 
-func (t *TinyLFU) Insert(key string, val Value) {
+func (t *TinyLFU) SetWithExpiration(key string, val Value, expiration time.Duration) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	var expTime time.Time
+	if expiration > 0 {
+		expTime = time.Now().Add(expiration)
+		t.lru.expires[key] = expTime
+	} else {
+		delete(t.lru.expires, key)
+	}
+
 	if node, ok := t.lru.cache[key]; ok {
-		// 更新已有节点的值，并调整内存容量
-		t.lru.usedBytes += uint64(val.Len()) - uint64(node.val.Len())
+		t.lru.usedBytes = t.lru.usedBytes - uint64(node.val.Len()) + uint64(val.Len())
 		node.val = val
 		t.lru.moveToHead(node)
-		t.cms.Insert(key)
+		t.cms.insert(key)
 	} else {
-		// 新节点
 		node := NewNode(key, val)
-		nodeSize := node.size()
-		if needToEvictedCount, ok := t.canEvictWithEstimatedSize(node); ok {
-			// 尝试腾出空间
-			for range needToEvictedCount {
+		if count, ok := t.canEvictWithEstimatedSize(node); ok {
+			for range count {
 				victim := t.lru.tail.prev
 				t.lru.usedBytes -= victim.size()
 				t.lru.removeNode(victim)
 				delete(t.lru.cache, victim.key)
 			}
-
-			// 如果腾出空间后，有足够的内存放置新节点，或者 maxBytes 本身为 0 (无限制)
 			t.lru.addToHead(node)
+			t.lru.usedBytes += node.size()
 			t.lru.cache[key] = node
-			t.lru.usedBytes += nodeSize
-			t.cms.Insert(key)
+			t.cms.insert(key)
 		} else {
+			return nil
+		}
+	}
+	return nil
+}
+
+func (t *TinyLFU) Set(key string, val Value) error {
+	return t.SetWithExpiration(key, val, -1)
+}
+
+func (t *TinyLFU) Delete(key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.lru.expires, key)
+	if node, ok := t.lru.cache[key]; ok {
+		t.lru.removeNode(node)
+		t.lru.usedBytes -= node.size()
+		delete(t.lru.cache, key)
+		return true
+	}
+	return false
+}
+
+func (t *TinyLFU) Clear() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	clear(t.cms.table)
+	t.cms.itemsAdded = 0
+
+	clear(t.lru.cache)
+	clear(t.lru.expires)
+	t.lru.head.next = t.lru.tail
+	t.lru.tail.prev = t.lru.head
+	t.lru.usedBytes = 0
+}
+
+func (t *TinyLFU) Len() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.lru.cache)
+}
+
+func (t *TinyLFU) removeExpiredEntries() {
+	now := time.Now()
+	for key, expTime := range t.lru.expires {
+		if now.After(expTime) {
+			if node, ok := t.lru.cache[key]; ok {
+				t.lru.removeNode(node)
+				t.lru.usedBytes -= node.size()
+				delete(t.lru.cache, node.key)
+			}
+			delete(t.lru.expires, key)
+		}
+	}
+}
+
+func (t *TinyLFU) cleanupLoop() {
+	for {
+		select {
+		case <-t.lru.cleanupTicker.C:
+			t.mu.Lock()
+			t.removeExpiredEntries()
+			t.mu.Unlock()
+		case <-t.lru.closeCh:
 			return
 		}
+	}
+}
+
+func (t *TinyLFU) Close() {
+	if t.lru != nil && t.lru.cleanupTicker != nil {
+		t.lru.cleanupTicker.Stop()
+		close(t.lru.closeCh)
 	}
 }
