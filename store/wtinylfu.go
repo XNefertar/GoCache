@@ -162,6 +162,53 @@ func (lru *LRUCache) moveToHead(node *Node) {
 	lru.addToHead(node)
 }
 
+func (lru *LRUCache) delete(key string) bool {
+	delete(lru.expires, key)
+	if node, ok := lru.cache[key]; ok {
+		lru.removeNode(node)
+		lru.usedBytes -= node.size()
+		delete(lru.cache, key)
+		return true
+	}
+	return false
+}
+
+func (lru *LRUCache) renew(node *Node, key string, val Value, expiration time.Duration) {
+	lru.usedBytes = lru.usedBytes - (uint64(node.val.Len()) - uint64(val.Len()))
+	node.val = val
+	lru.moveToHead(node)
+	var expTime time.Time
+	if expiration > 0 {
+		expTime = time.Now().Add(expiration)
+		lru.expires[key] = expTime
+	} else {
+		delete(lru.expires, key)
+	}
+}
+
+func (lru *LRUCache) remove(key string) {
+	if node, ok := lru.cache[key]; ok {
+		lru.removeNode(node)
+		lru.usedBytes -= node.size()
+		delete(lru.cache, key)
+		delete(lru.expires, key)
+	}
+}
+
+func (lru *LRUCache) get(key string) (*Node, bool) {
+	node, ok := lru.cache[key]
+	if !ok {
+		return nil, false
+	}
+
+	if expTime, exists := lru.expires[key]; exists && time.Now().After(expTime) {
+		lru.remove(key)
+		return nil, false
+	}
+	lru.moveToHead(node)
+	return node, true
+}
+
 type WTinyLFU struct {
 	mu           sync.Mutex
 	windowLRU    *LRUCache
@@ -253,42 +300,6 @@ func (t *WTinyLFU) addToProtected(node *Node, expiration time.Duration) {
 	}
 }
 
-func (lru *LRUCache) renew(node *Node, key string, val Value, expiration time.Duration) {
-	lru.usedBytes = lru.usedBytes - (uint64(node.val.Len()) - uint64(val.Len()))
-	node.val = val
-	lru.moveToHead(node)
-	var expTime time.Time
-	if expiration > 0 {
-		expTime = time.Now().Add(expiration)
-		lru.expires[key] = expTime
-	} else {
-		delete(lru.expires, key)
-	}
-}
-
-func (lru *LRUCache) remove(key string) {
-	if node, ok := lru.cache[key]; ok {
-		lru.removeNode(node)
-		lru.usedBytes -= node.size()
-		delete(lru.cache, key)
-		delete(lru.expires, key)
-	}
-}
-
-func (lru *LRUCache) get(key string) (*Node, bool) {
-	node, ok := lru.cache[key]
-	if !ok {
-		return nil, false
-	}
-
-	if expTime, exists := lru.expires[key]; exists && time.Now().After(expTime) {
-		lru.remove(key)
-		return nil, false
-	}
-	lru.moveToHead(node)
-	return node, true
-}
-
 func (t *WTinyLFU) SetWithExpiration(key string, val Value, expiration time.Duration) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -297,10 +308,7 @@ func (t *WTinyLFU) SetWithExpiration(key string, val Value, expiration time.Dura
 		return nil
 	}
 	if node, ok := t.probationLRU.cache[key]; ok {
-		t.probationLRU.removeNode(node)
-		t.probationLRU.usedBytes -= node.size()
-		delete(t.probationLRU.cache, key)
-		delete(t.probationLRU.expires, key)
+		t.probationLRU.delete(key)
 
 		node.val = val
 		t.addToProtected(node, expiration)
@@ -323,17 +331,12 @@ func (t *WTinyLFU) SetWithExpiration(key string, val Value, expiration time.Dura
 			break
 		}
 		windowLRURemainBytes += victim.size()
-		t.windowLRU.usedBytes -= victim.size()
-		delete(t.windowLRU.cache, victim.key)
-		delete(t.windowLRU.expires, victim.key)
+		t.windowLRU.delete(victim.key)
 
 		if count, ok := t.canEvictWithEstimatedSize(victim); ok {
 			for range count {
 				cur := t.probationLRU.tail.prev
-				t.probationLRU.removeNode(cur)
-				delete(t.probationLRU.cache, cur.key)
-				delete(t.probationLRU.expires, cur.key)
-				t.probationLRU.usedBytes -= cur.size()
+				t.probationLRU.delete(cur.key)
 			}
 			t.probationLRU.addToHead(victim)
 			t.probationLRU.cache[victim.key] = victim
@@ -370,9 +373,7 @@ func (t *WTinyLFU) Get(key string) (Value, bool) {
 			if lru == t.probationLRU {
 				lru.removeNode(node)
 				expTime, hasExp := lru.expires[key]
-				delete(lru.cache, key)
-				delete(lru.expires, key)
-				lru.usedBytes -= node.size()
+				lru.delete(node.key)
 
 				var duration time.Duration = -1
 				if hasExp {
@@ -408,17 +409,6 @@ func (t *WTinyLFU) canEvictWithEstimatedSize(node *Node) (int, bool) {
 		cur = cur.prev
 	}
 	return int(needToEvictedCount), true
-}
-
-func (lru *LRUCache) delete(key string) bool {
-	delete(lru.expires, key)
-	if node, ok := lru.cache[key]; ok {
-		lru.removeNode(node)
-		lru.usedBytes -= node.size()
-		delete(lru.cache, key)
-		return true
-	}
-	return false
 }
 
 func (t *WTinyLFU) Delete(key string) bool {
