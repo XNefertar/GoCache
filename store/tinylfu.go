@@ -162,16 +162,26 @@ func (lru *LRUCache) moveToHead(node *Node) {
 	lru.addToHead(node)
 }
 
-type TinyLFU struct {
-	mu  sync.Mutex
-	lru *LRUCache
-	cms *CountMinSketch
+type WTinyLFU struct {
+	mu           sync.Mutex
+	windowLRU    *LRUCache
+	probationLRU *LRUCache
+	protectedLRU *LRUCache
+	cms          *CountMinSketch
 }
 
-func newTinyLFU(opts Options) *TinyLFU {
-	t := &TinyLFU{
-		lru: NewLRUCache(LRUOptions{
-			maxBytes:        uint64(opts.MaxBytes),
+func newTinyLFU(opts Options) *WTinyLFU {
+	t := &WTinyLFU{
+		windowLRU: NewLRUCache(LRUOptions{
+			maxBytes:        uint64(float64(opts.MaxBytes) * 0.01),
+			cleanupInterval: opts.CleanupInterval,
+		}),
+		probationLRU: NewLRUCache(LRUOptions{
+			maxBytes:        uint64(float64(opts.MaxBytes) * 0.99 * 0.8),
+			cleanupInterval: opts.CleanupInterval,
+		}),
+		protectedLRU: NewLRUCache(LRUOptions{
+			maxBytes:        uint64(float64(opts.MaxBytes) * 0.99 * 0.2),
 			cleanupInterval: opts.CleanupInterval,
 		}),
 		cms: NewCountMinSketch(CMSOptions{
@@ -183,162 +193,297 @@ func newTinyLFU(opts Options) *TinyLFU {
 	return t
 }
 
-func (t *TinyLFU) Get(key string) (Value, bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+func (t *WTinyLFU) addToProtectedWithEnoughSpace(node *Node, expiration time.Duration) {
+	t.protectedLRU.addToHead(node)
+	t.protectedLRU.cache[node.key] = node
+	t.protectedLRU.usedBytes += node.size()
+	if expiration > 0 {
+		var expTime time.Time
+		expTime = time.Now().Add(expiration)
+		t.protectedLRU.expires[node.key] = expTime
+	}
+}
 
-	// 惰性删除检查（否则会读到已过期但还未被后台协程清理的数据）
-	if expTime, ok := t.lru.expires[key]; ok && time.Now().After(expTime) {
-		if node, exists := t.lru.cache[key]; exists {
-			t.lru.removeNode(node)
-			t.lru.usedBytes -= node.size()
-			delete(t.lru.cache, node.key)
+func (t *WTinyLFU) evictFromProbationIfFull(neededBytes uint64) {
+	remainBytes := t.probationLRU.maxBytes - t.probationLRU.usedBytes
+	for remainBytes < neededBytes {
+		victim := t.probationLRU.tail.prev
+		remainBytes += victim.size()
+		t.probationLRU.removeNode(victim)
+		delete(t.probationLRU.cache, victim.key)
+		delete(t.probationLRU.expires, victim.key)
+		t.probationLRU.usedBytes -= victim.size()
+	}
+}
+
+func (t *WTinyLFU) evictFromProtectedToProbation(neededBytes uint64) {
+	if t.probationLRU.maxBytes < neededBytes {
+		return
+	}
+	remainBytes := t.protectedLRU.maxBytes - t.protectedLRU.usedBytes
+	for remainBytes < neededBytes {
+		victim := t.protectedLRU.tail.prev
+		if victim == t.protectedLRU.head {
+			break
 		}
-		delete(t.lru.expires, key)
+		remainBytes += victim.size()
+		t.protectedLRU.removeNode(victim)
+		delete(t.protectedLRU.cache, victim.key)
+		victimExpTime, victimHasExpTime := t.protectedLRU.expires[victim.key]
+		delete(t.protectedLRU.expires, victim.key)
+		t.protectedLRU.usedBytes -= victim.size()
+
+		t.evictFromProbationIfFull(victim.size())
+		t.probationLRU.addToHead(victim)
+		t.probationLRU.cache[victim.key] = victim
+		if victimHasExpTime {
+			t.probationLRU.expires[victim.key] = victimExpTime
+		}
+		t.probationLRU.usedBytes += victim.size()
+	}
+}
+
+func (t *WTinyLFU) addToProtected(node *Node, expiration time.Duration) {
+	remainBytes := t.protectedLRU.maxBytes - t.protectedLRU.usedBytes
+	if remainBytes >= node.size() {
+		t.addToProtectedWithEnoughSpace(node, expiration)
+	} else {
+		t.evictFromProtectedToProbation(node.size())
+		t.addToProtectedWithEnoughSpace(node, expiration)
+	}
+}
+
+func (lru *LRUCache) renew(node *Node, key string, val Value, expiration time.Duration) {
+	lru.usedBytes = lru.usedBytes - (uint64(node.val.Len()) - uint64(val.Len()))
+	node.val = val
+	lru.moveToHead(node)
+	var expTime time.Time
+	if expiration > 0 {
+		expTime = time.Now().Add(expiration)
+		lru.expires[key] = expTime
+	} else {
+		delete(lru.expires, key)
+	}
+}
+
+func (lru *LRUCache) remove(key string) {
+	if node, ok := lru.cache[key]; ok {
+		lru.removeNode(node)
+		lru.usedBytes -= node.size()
+		delete(lru.cache, key)
+		delete(lru.expires, key)
+	}
+}
+
+func (lru *LRUCache) get(key string) (*Node, bool) {
+	node, ok := lru.cache[key]
+	if !ok {
 		return nil, false
 	}
 
-	t.cms.insert(key) // 关键附加动作：每次读取都增加频率
+	if expTime, exists := lru.expires[key]; exists && time.Now().After(expTime) {
+		lru.remove(key)
+		return nil, false
+	}
+	lru.moveToHead(node)
+	return node, true
+}
 
-	if node, ok := t.lru.cache[key]; ok {
-		t.lru.moveToHead(node)
-		return node.val, true
+func (t *WTinyLFU) SetWithExpiration(key string, val Value, expiration time.Duration) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if node, ok := t.windowLRU.cache[key]; ok {
+		t.windowLRU.renew(node, key, val, expiration)
+		return nil
+	}
+	if node, ok := t.probationLRU.cache[key]; ok {
+		t.probationLRU.removeNode(node)
+		t.probationLRU.usedBytes -= node.size()
+		delete(t.probationLRU.cache, key)
+		delete(t.probationLRU.expires, key)
+
+		node.val = val
+		t.addToProtected(node, expiration)
+	}
+	if node, ok := t.protectedLRU.cache[key]; ok {
+		t.protectedLRU.renew(node, key, val, expiration)
+		return nil
+	}
+	t.cms.insert(key)
+
+	// insert 逻辑
+	node := NewNode(key, val)
+	if node.size() > t.windowLRU.maxBytes {
+		return nil
+	}
+	windowLRURemainBytes := t.windowLRU.maxBytes - t.windowLRU.usedBytes
+	for windowLRURemainBytes < node.size() {
+		victim := t.windowLRU.tail.prev
+		if victim == t.windowLRU.head {
+			break
+		}
+		windowLRURemainBytes += victim.size()
+		t.windowLRU.usedBytes -= victim.size()
+		delete(t.windowLRU.cache, victim.key)
+		delete(t.windowLRU.expires, victim.key)
+
+		if count, ok := t.canEvictWithEstimatedSize(victim); ok {
+			for range count {
+				cur := t.probationLRU.tail.prev
+				t.probationLRU.removeNode(cur)
+				delete(t.probationLRU.cache, cur.key)
+				delete(t.probationLRU.expires, cur.key)
+				t.probationLRU.usedBytes -= cur.size()
+			}
+			t.probationLRU.addToHead(victim)
+			t.probationLRU.cache[victim.key] = victim
+			if expiration > 0 {
+				var expTime time.Time
+				expTime = time.Now().Add(expiration)
+				t.probationLRU.expires[victim.key] = expTime
+			}
+			t.probationLRU.usedBytes += victim.size()
+		}
+	}
+	t.windowLRU.addToHead(node)
+	t.windowLRU.cache[key] = node
+	if expiration > 0 {
+		var expTime time.Time
+		expTime = time.Now().Add(expiration)
+		t.windowLRU.expires[key] = expTime
+	}
+	t.windowLRU.usedBytes += node.size()
+	return nil
+
+}
+
+func (t *WTinyLFU) Set(key string, val Value) error {
+	return t.SetWithExpiration(key, val, -1)
+}
+
+func (t *WTinyLFU) Get(key string) (Value, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, lru := range []*LRUCache{t.windowLRU, t.probationLRU, t.protectedLRU} {
+		if node, ok := lru.get(key); ok {
+			// 晋升机制
+			if lru == t.probationLRU {
+				lru.removeNode(node)
+				expTime, hasExp := lru.expires[key]
+				delete(lru.cache, key)
+				delete(lru.expires, key)
+				lru.usedBytes -= node.size()
+
+				var duration time.Duration = -1
+				if hasExp {
+					duration = time.Until(expTime)
+				}
+				t.addToProtected(node, duration)
+			}
+			t.cms.insert(key)
+			return node.val, true
+		}
 	}
 	return nil, false
 }
 
-func (t *TinyLFU) canEvictWithEstimatedSize(node *Node) (int, bool) {
-	// 0 表示无限容量
-	if t.lru.maxBytes == 0 {
-		return 0, true
-	}
-	needToEvictedCount := 0
-	nodeSize := node.size()
-	candidateFreq := t.cms.estimate(node.key)
-	tempUsedByts := t.lru.usedBytes
-	if nodeSize > t.lru.maxBytes {
+func (t *WTinyLFU) canEvictWithEstimatedSize(node *Node) (int, bool) {
+	if node.size() > t.probationLRU.maxBytes {
 		return -1, false
 	}
-	cur := t.lru.tail.prev
-	for tempUsedByts+nodeSize > t.lru.maxBytes {
-		if cur == t.lru.head {
+	candidateFreq := t.cms.estimate(node.key)
+	remainBytes := t.probationLRU.maxBytes - t.probationLRU.usedBytes
+	var needToEvictedCount uint64
+	cur := t.probationLRU.tail.prev
+	for remainBytes < node.size() {
+		if cur == t.probationLRU.head {
 			return -1, false
 		}
-		curFreq := t.cms.estimate(cur.key)
-		if candidateFreq > curFreq {
-			needToEvictedCount++
-			tempUsedByts -= cur.size()
-		} else {
+		victimFreq := t.cms.estimate(cur.key)
+		if victimFreq >= candidateFreq {
 			return -1, false
 		}
+		needToEvictedCount++
+		remainBytes += cur.size()
 		cur = cur.prev
 	}
-	return needToEvictedCount, true
+	return int(needToEvictedCount), true
 }
 
-func (t *TinyLFU) SetWithExpiration(key string, val Value, expiration time.Duration) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	var expTime time.Time
-	if expiration > 0 {
-		expTime = time.Now().Add(expiration)
-		t.lru.expires[key] = expTime
-	} else {
-		delete(t.lru.expires, key)
-	}
-
-	if node, ok := t.lru.cache[key]; ok {
-		t.lru.usedBytes = t.lru.usedBytes - uint64(node.val.Len()) + uint64(val.Len())
-		node.val = val
-		t.lru.moveToHead(node)
-		t.cms.insert(key)
-	} else {
-		node := NewNode(key, val)
-		if count, ok := t.canEvictWithEstimatedSize(node); ok {
-			for range count {
-				victim := t.lru.tail.prev
-				t.lru.usedBytes -= victim.size()
-				t.lru.removeNode(victim)
-				delete(t.lru.cache, victim.key)
-			}
-			t.lru.addToHead(node)
-			t.lru.usedBytes += node.size()
-			t.lru.cache[key] = node
-			t.cms.insert(key)
-		} else {
-			return nil
-		}
-	}
-	return nil
-}
-
-func (t *TinyLFU) Set(key string, val Value) error {
-	return t.SetWithExpiration(key, val, -1)
-}
-
-func (t *TinyLFU) Delete(key string) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	delete(t.lru.expires, key)
-	if node, ok := t.lru.cache[key]; ok {
-		t.lru.removeNode(node)
-		t.lru.usedBytes -= node.size()
-		delete(t.lru.cache, key)
+func (lru *LRUCache) delete(key string) bool {
+	delete(lru.expires, key)
+	if node, ok := lru.cache[key]; ok {
+		lru.removeNode(node)
+		lru.usedBytes -= node.size()
+		delete(lru.cache, key)
 		return true
 	}
 	return false
 }
 
-func (t *TinyLFU) Clear() {
+func (t *WTinyLFU) Delete(key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, lru := range []*LRUCache{t.windowLRU, t.probationLRU, t.protectedLRU} {
+		if lru.delete(key) {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *WTinyLFU) Clear() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	clear(t.cms.table)
 	t.cms.itemsAdded = 0
 
-	clear(t.lru.cache)
-	clear(t.lru.expires)
-	t.lru.head.next = t.lru.tail
-	t.lru.tail.prev = t.lru.head
-	t.lru.usedBytes = 0
+	for _, lru := range []*LRUCache{t.windowLRU, t.probationLRU, t.protectedLRU} {
+		clear(lru.cache)
+		clear(lru.expires)
+		lru.head.next = lru.tail
+		lru.tail.prev = lru.head
+		lru.usedBytes = 0
+	}
 }
 
-func (t *TinyLFU) Len() int {
+func (t *WTinyLFU) Len() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return len(t.lru.cache)
+	return len(t.windowLRU.cache) + len(t.probationLRU.cache) + len(t.protectedLRU.cache)
 }
 
-func (t *TinyLFU) removeExpiredEntries() {
-	now := time.Now()
-	for key, expTime := range t.lru.expires {
-		if now.After(expTime) {
-			if node, ok := t.lru.cache[key]; ok {
-				t.lru.removeNode(node)
-				t.lru.usedBytes -= node.size()
-				delete(t.lru.cache, node.key)
+func (t *WTinyLFU) removeExpiredEntries() {
+	for _, lru := range []*LRUCache{t.windowLRU, t.probationLRU, t.protectedLRU} {
+		now := time.Now()
+		for key, expTime := range lru.expires {
+			if now.After(expTime) {
+				lru.delete(key)
 			}
-			delete(t.lru.expires, key)
 		}
 	}
 }
 
-func (t *TinyLFU) cleanupLoop() {
+func (t *WTinyLFU) cleanupLoop() {
+	// 只需要用其中一个 ticker 来驱动，因为它们的清理周期是一样的
 	for {
 		select {
-		case <-t.lru.cleanupTicker.C:
+		case <-t.windowLRU.cleanupTicker.C:
 			t.mu.Lock()
 			t.removeExpiredEntries()
 			t.mu.Unlock()
-		case <-t.lru.closeCh:
+		case <-t.windowLRU.closeCh:
 			return
 		}
 	}
 }
 
-func (t *TinyLFU) Close() {
-	if t.lru != nil && t.lru.cleanupTicker != nil {
-		t.lru.cleanupTicker.Stop()
-		close(t.lru.closeCh)
+func (t *WTinyLFU) Close() {
+	// 遍历并关闭所有 LRU 分区的 ticker 和 channel，防止内存泄漏
+	for _, lru := range []*LRUCache{t.windowLRU, t.probationLRU, t.protectedLRU} {
+		if lru != nil && lru.cleanupTicker != nil {
+			lru.cleanupTicker.Stop()
+			close(lru.closeCh)
+		}
 	}
 }
