@@ -256,10 +256,7 @@ func (t *WTinyLFU) evictFromProbationIfFull(neededBytes uint64) {
 	for remainBytes < neededBytes {
 		victim := t.probationLRU.tail.prev
 		remainBytes += victim.size()
-		t.probationLRU.removeNode(victim)
-		delete(t.probationLRU.cache, victim.key)
-		delete(t.probationLRU.expires, victim.key)
-		t.probationLRU.usedBytes -= victim.size()
+		t.probationLRU.delete(victim.key)
 	}
 }
 
@@ -274,11 +271,8 @@ func (t *WTinyLFU) evictFromProtectedToProbation(neededBytes uint64) {
 			break
 		}
 		remainBytes += victim.size()
-		t.protectedLRU.removeNode(victim)
-		delete(t.protectedLRU.cache, victim.key)
 		victimExpTime, victimHasExpTime := t.protectedLRU.expires[victim.key]
-		delete(t.protectedLRU.expires, victim.key)
-		t.protectedLRU.usedBytes -= victim.size()
+		t.protectedLRU.delete(victim.key)
 
 		t.evictFromProbationIfFull(victim.size())
 		t.probationLRU.addToHead(victim)
