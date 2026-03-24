@@ -29,9 +29,9 @@ func runBenchmarkMode() {
 	cacheGroup := kamacache.NewGroup("benchmark-group", opts.MaxBytes, mockDBGetter, kamacache.WithCacheOptions(opts))
 
 	// 参数设定
-	keySpace := 50000       // 总数据量 5万
-	totalRequests := 500000 // 50万次请求
-	concurrency := 16       // 并发
+	keySpace := 500000       // 总数据量 50万
+	totalRequests := 5000000 // 500万次请求
+	concurrency := 16        // 并发
 
 	// 1. 测试 Zipfian 模式
 	fmt.Println("\n>>> Testing Zipfian Mode (Hotspot)")
@@ -82,4 +82,8 @@ func runBenchmarkMode() {
 	misses4 := dbMissCount.Load()
 	realHitRate4 := float64(totalRequests-int(misses4)) / float64(totalRequests) * 100
 	fmt.Printf("[Real Metrics via DB] Hit Rate: %.2f%% (%d Misses / %d requests)\n", realHitRate4, misses4, totalRequests)
+
+	fmt.Println("\n>>> 所有测试已完成，pprof 服务器 (http://localhost:6060) 仍保持运行。")
+	fmt.Println(">>> 请在另一个终端运行 pprof 采集指令。采集完成后按 Ctrl+C 退出程序。")
+	select {} // 永久阻塞主协程
 }
