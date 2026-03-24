@@ -1,9 +1,10 @@
 package store
 
 import (
-	"hash/fnv"
 	"sync"
 	"time"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 type CMSOptions struct {
@@ -102,9 +103,7 @@ func NewNode(key string, val Value) *Node {
 
 // 提取基础哈希计算，避免循环内重复创建对象和计算哈希
 func (cms *CountMinSketch) baseHash(key string) uint64 {
-	h := fnv.New64a()
-	h.Write([]byte(key))
-	return h.Sum64()
+	return xxhash.Sum64String(key)
 }
 
 func (cms *CountMinSketch) insert(key string) {
