@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/youngyangyang04/KamaCache-Go/memory"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -38,7 +39,12 @@ func Register(svcName, addr string, stopCh <-chan error) error {
 		return fmt.Errorf("failed to get local IP: %v", err)
 	}
 	if addr[0] == ':' {
-		addr = fmt.Sprintf("%s%s", localIP, addr)
+		size := len(localIP) + len(addr)
+		buf := memory.AllocByte(size)
+		n := copy(buf, localIP)
+		copy(buf[n:], addr)
+		addr = string(buf)
+		memory.FreeByte(buf)
 	}
 
 	// 创建租约
@@ -49,7 +55,15 @@ func Register(svcName, addr string, stopCh <-chan error) error {
 	}
 
 	// 注册服务，使用完整的key路径
-	key := fmt.Sprintf("/services/%s/%s", svcName, addr)
+	size := len("/services/") + len(svcName) + 1 + len(addr)
+	buf := memory.AllocByte(size)
+	n := copy(buf, "/services/")
+	n += copy(buf[n:], svcName)
+	buf[n] = '/'
+	copy(buf[n+1:], addr)
+	key := string(buf)
+	memory.FreeByte(buf)
+
 	_, err = cli.Put(context.Background(), key, addr, clientv3.WithLease(lease.ID))
 	if err != nil {
 		cli.Close()

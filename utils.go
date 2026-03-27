@@ -1,16 +1,41 @@
 package kamacache
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/youngyangyang04/KamaCache-Go/memory"
+)
+
+// JoinAddr 优化字符串拼接
+func JoinAddr(host, port string) string {
+	size := len(host) + 1 + len(port)
+	buf := memory.AllocByte(size)
+	defer memory.FreeByte(buf)
+
+	n := copy(buf, host)
+	buf[n] = ':'
+	copy(buf[n+1:], port)
+
+	return string(buf)
+}
 
 func ValidPeerAddr(addr string) bool {
-	t1 := strings.Split(addr, ":")
-	if len(t1) != 2 {
+	idx := strings.IndexByte(addr, ':')
+	if idx == -1 || idx == len(addr)-1 {
 		return false
 	}
-	// TODO: more selections
-	t2 := strings.Split(t1[0], ".")
-	if t1[0] != "localhost" && len(t2) != 4 {
-		return false
+	host := addr[:idx]
+
+	if host != "localhost" {
+		dots := 0
+		for i := 0; i < len(host); i++ {
+			if host[i] == '.' {
+				dots++
+			}
+		}
+		if dots != 3 {
+			return false
+		}
 	}
 	return true
 }
