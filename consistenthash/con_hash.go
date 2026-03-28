@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/youngyangyang04/KamaCache-Go/memory"
 )
 
 // Map 一致性哈希实现
@@ -92,8 +94,13 @@ func (m *Map) Remove(node string) error {
 	}
 
 	// 移除节点的所有虚拟节点
-	for i := 0; i < replicas; i++ {
-		hash := int(m.config.HashFunc([]byte(fmt.Sprintf("%s-%d", node, i))))
+	for i := range replicas {
+		key := fmt.Sprintf("%s-%d", node, i)
+		buf := memory.AllocByte(len(key))
+		copy(buf, key)
+		hash := int(m.config.HashFunc(buf))
+		memory.FreeByte(buf)
+
 		delete(m.hashMap, hash)
 		for j := 0; j < len(m.keys); j++ {
 			if m.keys[j] == hash {
@@ -121,7 +128,11 @@ func (m *Map) Get(key string) string {
 		return ""
 	}
 
-	hash := int(m.config.HashFunc([]byte(key)))
+	buf := memory.AllocByte(len(key))
+	copy(buf, key)
+	hash := int(m.config.HashFunc(buf))
+	memory.FreeByte(buf)
+
 	// 二分查找
 	idx := sort.Search(len(m.keys), func(i int) bool {
 		return m.keys[i] >= hash
@@ -143,7 +154,12 @@ func (m *Map) Get(key string) string {
 // addNode 添加节点的虚拟节点
 func (m *Map) addNode(node string, replicas int) {
 	for i := 0; i < replicas; i++ {
-		hash := int(m.config.HashFunc([]byte(fmt.Sprintf("%s-%d", node, i))))
+		key := fmt.Sprintf("%s-%d", node, i)
+		buf := memory.AllocByte(len(key))
+		copy(buf, key)
+		hash := int(m.config.HashFunc(buf))
+		memory.FreeByte(buf)
+
 		m.keys = append(m.keys, hash)
 		m.hashMap[hash] = node
 	}

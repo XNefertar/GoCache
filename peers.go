@@ -10,6 +10,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/youngyangyang04/KamaCache-Go/consistenthash"
+	"github.com/youngyangyang04/KamaCache-Go/memory"
 	"github.com/youngyangyang04/KamaCache-Go/registry"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -232,7 +233,15 @@ func (p *ClientPicker) Close() error {
 
 // parseAddrFromKey 从etcd key中解析地址
 func parseAddrFromKey(key, svcName string) string {
-	prefix := fmt.Sprintf("/services/%s/", svcName)
+	size := len("/services/") + len(svcName) + 1
+	buf := memory.AllocByte(size)
+	defer memory.FreeByte(buf)
+
+	n := copy(buf, "/services/")
+	n += copy(buf[n:], svcName)
+	buf[n] = '/'
+
+	prefix := string(buf)
 	if strings.HasPrefix(key, prefix) {
 		return strings.TrimPrefix(key, prefix)
 	}

@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"sync"
 	"time"
 
 	kamacache "github.com/youngyangyang04/KamaCache-Go"
+	"github.com/youngyangyang04/KamaCache-Go/memory"
 )
 
 type RequestGenMode int
@@ -30,6 +32,17 @@ func modeString(mode RequestGenMode) string {
 
 type Request string
 
+func fastKey(prefix string, id uint64) string {
+	b := memory.AllocByte(len(prefix) + 20)
+	defer memory.FreeByte(b)
+
+	n := copy(b, prefix)
+	// strconv.AppendUint 会把转换后的字节追加到我们借来的 slice 的已用长度后面
+	// 所以我们需要对 b 进行正确的 slice 操作来传给 AppendUint
+	res := strconv.AppendUint(b[:n], id, 10)
+	return string(res)
+}
+
 func GenerateWorkload(mode RequestGenMode, keySpace int, totalRequests int) []Request {
 	var requests []Request
 
@@ -40,13 +53,13 @@ func GenerateWorkload(mode RequestGenMode, keySpace int, totalRequests int) []Re
 
 	switch mode {
 	case Zipfian:
-		for i := 0; i < totalRequests; i++ {
+		for range totalRequests {
 			keyId := zipfGenerator.Uint64()
-			requests = append(requests, Request(fmt.Sprintf("key-%d", keyId%uint64(keySpace))))
+			requests = append(requests, Request(fastKey("key-", keyId%uint64(keySpace))))
 		}
 	case Scan:
-		for i := 0; i < totalRequests; i++ {
-			requests = append(requests, Request(fmt.Sprintf("key-%d", i%keySpace)))
+		for i := range totalRequests {
+			requests = append(requests, Request(fastKey("key-", uint64(i%keySpace))))
 		}
 	}
 	return requests

@@ -166,7 +166,23 @@ func (s *Server) Get(ctx context.Context, req *pb.Request) (*pb.ResponseForGet, 
 		return nil, err
 	}
 
-	return &pb.ResponseForGet{Value: view.ByteSLice()}, nil
+	// 1. 使用内存池分配 []byte 并拷贝数据
+	// buf := view.ByteSlicePool()
+
+	// 2. 为了保证这段内存在 gRPC 序列化发送完毕后被回收，
+	// 我们必须在一个独立的 defer (或在拦截器内) 释放。
+	// 但这在 gRPC 里有些 tricky，因为 return struct 之后我们不能立刻 free
+	// 【妥协方案】因为 gRPC 本身会在内部序列化，我们可以先依然使用这个对象，
+	// 目前 gRPC 的纯服务器模式很难做完全安全的归还，如果强行 return defer，
+	// 会导致 gRPC 序列化时读取到已被 free 并可能篡改的内存。
+	// 这里给出第一步：我们直接不释放，或者留给专用的 GC。
+
+	// 为了绝对安全以及实现闭环，更好的方式是：修改 gRPC 的序列化流程，
+	// 或者如果你不需要在这个级别深抠内存，可以暂时仍然用普通 ByteSlice。
+	// 下面演示完整调用流程，但为了避免 grpc 发送中并发读写，我们在当前上下文中
+	// 我们不用 `defer` 直接在此处释放，因为 return 后 gRPC 才会 marshal 它。
+	// 我们提供使用演示：
+	return &pb.ResponseForGet{Value: view.ByteSlice()}, nil
 }
 
 // Set 实现Cache服务的Set方法
