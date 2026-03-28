@@ -95,7 +95,12 @@ func (m *Map) Remove(node string) error {
 
 	// 移除节点的所有虚拟节点
 	for i := range replicas {
-		hash := int(m.config.HashFunc([]byte(fmt.Sprintf("%s-%d", node, i))))
+		key := fmt.Sprintf("%s-%d", node, i)
+		buf := memory.AllocByte(len(key))
+		copy(buf, key)
+		hash := int(m.config.HashFunc(buf))
+		memory.FreeByte(buf)
+
 		delete(m.hashMap, hash)
 		for j := 0; j < len(m.keys); j++ {
 			if m.keys[j] == hash {
