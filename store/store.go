@@ -1,6 +1,8 @@
 package store
 
-import "time"
+import (
+	"time"
+)
 
 // Value 缓存值接口
 type Value interface {
@@ -25,7 +27,15 @@ const (
 	LRU     CacheType = "lru"
 	LRU2    CacheType = "lru2"
 	TINYLFU CacheType = "tinylfu"
+	LSM     CacheType = "lsm"
 )
+
+var lsmFactory func(Options) Store
+
+// RegisterLSMFactory 注册 LSM 存储工厂
+func RegisterLSMFactory(factory func(Options) Store) {
+	lsmFactory = factory
+}
 
 // Options 通用缓存配置选项
 type Options struct {
@@ -61,6 +71,11 @@ func NewStore(cacheType CacheType, opts Options) Store {
 		return newLRUCache(opts)
 	case TINYLFU:
 		return newTinyLFU(opts)
+	case LSM:
+		if lsmFactory != nil {
+			return lsmFactory(opts)
+		}
+		panic("LSM not registered. Please import store/lsm.")
 	default:
 		return newLRUCache(opts)
 	}
