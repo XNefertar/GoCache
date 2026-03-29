@@ -3,7 +3,7 @@ package kamacache
 import (
 	"strings"
 
-	"github.com/youngyangyang04/KamaCache-Go/memory"
+	"github.com/XNefertar/GoCache/memory"
 )
 
 // JoinAddr 优化字符串拼接

@@ -1,7 +1,7 @@
 package kamacache
 
 import (
-	"github.com/youngyangyang04/KamaCache-Go/memory"
+	"github.com/XNefertar/GoCache/memory"
 )
 
 // ByteView 只读的字节视图，用于缓存数据

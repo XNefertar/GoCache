@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 
 	"github.com/sirupsen/logrus"
-	kamacache "github.com/youngyangyang04/KamaCache-Go"
-	"github.com/youngyangyang04/KamaCache-Go/benchmark"
-	"github.com/youngyangyang04/KamaCache-Go/store"
+	kamacache "github.com/XNefertar/GoCache"
+	"github.com/XNefertar/GoCache/benchmark"
+	"github.com/XNefertar/GoCache/store"
 )
 
 func runBenchmarkMode() {

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	kamacache "github.com/youngyangyang04/KamaCache-Go"
-	"github.com/youngyangyang04/KamaCache-Go/memory"
+	kamacache "github.com/XNefertar/GoCache"
+	"github.com/XNefertar/GoCache/memory"
 )
 
 type RequestGenMode int
