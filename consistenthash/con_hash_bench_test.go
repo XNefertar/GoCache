@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/youngyangyang04/KamaCache-Go/memory"
+	"github.com/XNefertar/GoCache/memory"
 )
 
 // 模拟旧代码：完全依赖 fmt.Sprintf 和强转 []byte 的产生大量垃圾的写法

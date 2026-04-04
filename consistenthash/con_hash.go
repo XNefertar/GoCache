@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/youngyangyang04/KamaCache-Go/memory"
+	"github.com/XNefertar/GoCache/memory"
 )
 
 // Map 一致性哈希实现

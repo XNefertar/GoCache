@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/youngyangyang04/KamaCache-Go/store"
+	"github.com/XNefertar/GoCache/store"
 
 	"github.com/sirupsen/logrus"
 )
