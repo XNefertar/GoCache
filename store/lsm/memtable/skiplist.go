@@ -82,7 +82,7 @@ func (sl *SkipList) Get(key string) ([]byte, bool) {
 	defer sl.mu.RUnlock()
 
 	cur := sl.head
-	for i := sl.level; i >= 0; i-- {
+	for i := sl.level - 1; i >= 0; i-- {
 		for cur.next[i] != nil && cur.next[i].key < key {
 			cur = cur.next[i]
 		}
@@ -92,4 +92,28 @@ func (sl *SkipList) Get(key string) ([]byte, bool) {
 		return cur.value, true
 	}
 	return nil, false
+}
+
+type Iterator struct {
+	cur *Node
+}
+
+func (sl *SkipList) NewIterator() *Iterator {
+	return &Iterator{cur: sl.head.next[0]}
+}
+
+func (it *Iterator) Valid() bool {
+	return it.cur != nil
+}
+
+func (it *Iterator) Next() {
+	it.cur = it.cur.next[0]
+}
+
+func (it *Iterator) Key() string {
+	return it.cur.key
+}
+
+func (it *Iterator) Value() []byte {
+	return it.cur.value
 }
