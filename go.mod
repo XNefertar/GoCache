@@ -10,6 +10,8 @@ require (
 	google.golang.org/protobuf v1.36.4
 )
 
+require github.com/HdrHistogram/hdrhistogram-go v1.1.2
+
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // direct
 	github.com/coreos/go-semver v0.3.0 // indirect

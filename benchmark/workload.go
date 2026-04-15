@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/HdrHistogram/hdrhistogram-go"
 	kamacache "github.com/XNefertar/GoCache"
 	"github.com/XNefertar/GoCache/memory"
 )
@@ -81,15 +82,21 @@ func splitRequest(requests []Request, level int) [][]Request {
 type BenchResult struct {
 	hit  int
 	miss int
+	hist *hdrhistogram.Histogram // 用于记录延迟分布
 }
 
 func aggregateAndPrint(results chan BenchResult, totalRequests int, totalDuration time.Duration, mode string) {
 	totalHits := 0
 	totalMisses := 0
+	mergedHist := hdrhistogram.New(1, 1000000000, 3) // 1ns to 1s, 3 sig figs
 
 	for res := range results {
 		totalHits += res.hit
 		totalMisses += res.miss
+		// 合并各个协程的柱状图数据
+		if res.hist != nil {
+			mergedHist.Merge(res.hist)
+		}
 	}
 
 	hitRate := float64(totalHits) / float64(totalHits+totalMisses) * 100
@@ -101,6 +108,13 @@ func aggregateAndPrint(results chan BenchResult, totalRequests int, totalDuratio
 	fmt.Printf("Total Duration: %v\n", totalDuration)
 	fmt.Printf("Throughput (QPS): %.2f ops/s\n", qps)
 	fmt.Printf("Hit Rate:       %.2f%% (%d hits / %d misses)\n", hitRate, totalHits, totalMisses)
+
+	// 打印延迟分布信息（将纳秒转换为毫秒）
+	fmt.Printf("Latency (P50):  %.3f ms\n", float64(mergedHist.ValueAtQuantile(50))/1e6)
+	fmt.Printf("Latency (P90):  %.3f ms\n", float64(mergedHist.ValueAtQuantile(90))/1e6)
+	fmt.Printf("Latency (P99):  %.3f ms\n", float64(mergedHist.ValueAtQuantile(99))/1e6)
+	fmt.Printf("Latency (P99.9):%.3f ms\n", float64(mergedHist.ValueAtQuantile(99.9))/1e6)
+	fmt.Printf("Latency (Max):  %.3f ms\n", float64(mergedHist.Max())/1e6)
 	fmt.Printf("========================\n\n")
 }
 
@@ -120,11 +134,22 @@ func RunBenchmark(mode RequestGenMode, keySpace int, totalRequests int, level in
 		go func(requests []Request) {
 			defer wg.Done()
 			hitCount, missCount := 0, 0
+
+			// 记录 1纳秒到 1000秒之间的分布，精度为 3 位有效数字
+			localHist := hdrhistogram.New(1, 1000000000000, 3)
+
 			// 为了极致性能，使用同一个context
 			ctx := context.Background()
 
 			for _, req := range requests {
+				reqStart := time.Now()
 				view, err := cacheGroup.Get(ctx, string(req))
+
+				// 记录该次请求的延迟耗时（微秒级误差通过hdr合并解决）
+				if errRecord := localHist.RecordValue(time.Since(reqStart).Nanoseconds()); errRecord != nil {
+					// 处理超过上界的异常用例（一般不会发生）
+				}
+
 				// 在 KamaCache 中，如果没有底层数据会返回 error
 				// 由于我们在 Group 已经通过 Getter 解决了 Miss 时的回源写入
 				// 我们需要检查是否有合法的真实响应 (比如我们造假数据能返回真实的字节)
@@ -134,7 +159,7 @@ func RunBenchmark(mode RequestGenMode, keySpace int, totalRequests int, level in
 					missCount++
 				}
 			}
-			results <- BenchResult{hit: hitCount, miss: missCount}
+			results <- BenchResult{hit: hitCount, miss: missCount, hist: localHist}
 		}(requestLists[i])
 	}
 

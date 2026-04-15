@@ -4,11 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sync/atomic"
+	"time"
 
-	"github.com/sirupsen/logrus"
 	kamacache "github.com/XNefertar/GoCache"
 	"github.com/XNefertar/GoCache/benchmark"
 	"github.com/XNefertar/GoCache/store"
+	"github.com/sirupsen/logrus"
 )
 
 func runBenchmarkMode() {
@@ -18,6 +19,8 @@ func runBenchmarkMode() {
 	// 创建一个模拟数据库，延迟为一定时间，返回固定长度的值（例如 1KB）
 	mockDBGetter := kamacache.GetterFunc(func(ctx context.Context, key string) ([]byte, error) {
 		dbMissCount.Add(1)
+		// 模拟数据库的真实查询延迟 (2ms)
+		time.Sleep(time.Millisecond * 2)
 		// 模拟返回 1KB 数据
 		return make([]byte, 1024), nil
 	})
